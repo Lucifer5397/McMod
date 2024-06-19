@@ -1,0 +1,130 @@
+import time  # 导入time模块，用于时间相关操作
+from threading import Timer  # 从threading模块导入Timer类，用于定时任务
+
+
+class TeamPlugin:
+    def __init__(self, mod):
+        self.mod = mod  # 初始化时传入的mod对象
+        self.pending_invites = {}  # 用于存储待处理的组队邀请，键为目标玩家UUID
+        self.teams = {}  # 用于存储队伍信息，键为玩家UUID，值为队伍ID
+        self.team_members = {}  # 用于存储每个队伍的成员，键为队伍ID，值为玩家UUID列表
+        # 注册玩家交互事件，当玩家与另一个玩家互动时触发
+        self.mod.register_event('player_interact', self.on_player_interact)
+        # 注册玩家消息事件，当玩家发送消息时触发
+        self.mod.register_event('player_message', self.on_player_message)
+        # 注册玩家登出事件，当玩家登出时触发
+        self.mod.register_event('player_logout', self.on_player_logout)
+        # 定期任务，每60秒调用一次check_invites方法，检查是否有超时的邀请
+        self.mod.schedule_task(self.check_invites, 60, repeat=True)
+        # 定期任务，每60秒调用一次check_teams方法，检查队伍人数
+        self.mod.schedule_task(self.check_teams, 60, repeat=True)
+
+    def on_player_interact(self, event):
+        player = event['player']  # 获取发起互动的玩家对象
+        target = event['target_player']  # 获取被互动的目标玩家对象
+
+        # 如果存在目标玩家且目标玩家不是自己，发送组队邀请
+        if target and player != target:
+            self.send_invite(player, target)
+
+    def send_invite(self, player, target):
+        player_id = player['uuid']  # 获取发起邀请玩家的UUID
+        target_id = target['uuid']  # 获取目标玩家的UUID
+        # 存储邀请信息，包括邀请发起者的UUID、时间戳和处理标志
+        self.pending_invites[target_id] = {
+            'inviter_id': player_id,
+            'timestamp': time.time(),
+            'handled': False
+        }
+        # 向发起邀请的玩家发送消息，确认邀请已发送
+        player.send_message(f"组队邀请已发送给 {target['name']}")
+        # 向目标玩家发送消息，通知他收到的组队邀请，并说明如何接受或拒绝
+        target.send_message(f"{player['name']} (等级: {player['level']}) 邀请你组队，输入 yes 或 no 来接受或拒绝。")
+
+    def on_player_message(self, event):
+        player = event['player']  # 获取发送消息的玩家对象
+        message = event['message'].strip().lower()  # 获取并处理玩家的消息，去除两端空白并转为小写
+        player_id = player['uuid']  # 获取发送消息玩家的UUID
+
+        # 检查该玩家是否有待处理的邀请
+        if player_id in self.pending_invites:
+            invite = self.pending_invites[player_id]  # 获取邀请信息
+
+            if not invite['handled']:  # 检查该邀请是否已经处理
+                if message == 'yes':  # 玩家接受邀请
+                    inviter_id = invite['inviter_id']  # 获取邀请发起者的UUID
+                    inviter = self.mod.get_player(inviter_id)  # 获取邀请发起者对象
+
+                    if inviter:  # 如果邀请发起者在线
+                        # 向邀请发起者发送消息，通知他邀请已被接受
+                        inviter.send_message(f"{player['name']} 接受了你的组队邀请！")
+                        # 向接受邀请的玩家发送消息，确认加入队伍
+                        player.send_message(f"你已加入 {inviter['name']} 的队伍！")
+
+                        # 如果发起者还没有队伍，则创建一个新的队伍
+                        if inviter_id not in self.teams:
+                            team_id = inviter_id  # 使用发起者的UUID作为队伍ID
+                            self.team_members[team_id] = [inviter_id]
+                            self.teams[inviter_id] = team_id
+                        else:
+                            team_id = self.teams[inviter_id]
+
+                        # 将接受邀请的玩家加入到发起者的队伍
+                        self.teams[player_id] = team_id
+                        self.team_members[team_id].append(player_id)
+
+                    # 标记该邀请为已处理
+                    invite['handled'] = True
+
+                elif message == 'no':  # 玩家拒绝邀请
+                    inviter = self.mod.get_player(invite['inviter_id'])  # 获取邀请发起者对象
+                    if inviter:  # 如果邀请发起者在线
+                        # 向邀请发起者发送消息，通知他邀请已被拒绝
+                        inviter.send_message(f"{player['name']} 拒绝了你的组队邀请。")
+                        # 向拒绝邀请的玩家发送消息，确认拒绝
+                        player.send_message(f"你拒绝了 {inviter['name']} 的组队邀请。")
+                    # 标记该邀请为已处理
+                    invite['handled'] = True
+
+    def on_player_logout(self, event):
+        player_id = event['player']['uuid']  # 获取登出玩家的UUID
+        # 移除该玩家所有待处理的邀请
+        self.pending_invites.pop(player_id, None)
+
+        # 移除该玩家的队伍信息
+        if player_id in self.teams:
+            team_id = self.teams.pop(player_id, None)
+            if team_id in self.team_members:
+                self.team_members[team_id].remove(player_id)
+                # 如果队伍人数少于2人，解散队伍
+                if len(self.team_members[team_id]) < 2:
+                    for member_id in self.team_members[team_id]:
+                        self.teams.pop(member_id, None)
+                        member = self.mod.get_player(member_id)
+                        if member:
+                            member.send_message("你的队伍已解散，因为人数不足。")
+                    self.team_members.pop(team_id, None)
+
+    def check_invites(self):
+        current_time = time.time()  # 获取当前时间
+        # 找出所有已超时的邀请，超时设定为60秒
+        expired_invites = [player_id for player_id, invite in self.pending_invites.items()
+                           if current_time - invite['timestamp'] > 60]
+
+        for player_id in expired_invites:  # 处理每个超时的邀请
+            player = self.mod.get_player(player_id)  # 获取目标玩家对象
+            if player:  # 如果目标玩家在线
+                # 发送消息通知目标玩家邀请已超时
+                player.send_message("你的组队邀请已超时。")
+            # 从待处理邀请中移除该邀请
+            self.pending_invites.pop(player_id, None)
+
+    def check_teams(self):
+        for team_id, members in list(self.team_members.items()):  # 遍历所有队伍
+            if len(members) < 2:  # 如果队伍人数少于2人
+                for member_id in members:
+                    self.teams.pop(member_id, None)  # 移除队伍成员的队伍信息
+                    member = self.mod.get_player(member_id)
+                    if member:
+                        member.send_message("你的队伍已解散，因为人数不足。")
+                self.team_members.pop(team_id, None)  # 解散队伍
