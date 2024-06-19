@@ -14,7 +14,6 @@ Python3.9
 import time
 from threading import Timer
 
-
 class TeamPlugin:
     def __init__(self, mod):
         self.mod = mod
