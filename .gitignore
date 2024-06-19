@@ -1,0 +1,6 @@
+# 工作目录
+.git/
+.vscode/
+
+# Python 临时文件
+*.pyc
